@@ -54,3 +54,8 @@ class BirdnetClient:
     def delete_detection(self, detection_id: str) -> bool:
         resp = self._request("DELETE", f"/detections/{detection_id}")
         return resp.ok
+
+    def realtime_settings(self) -> dict:
+        resp = self.session.get(f"{self.base_url}/settings/realtime", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()

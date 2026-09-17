@@ -43,6 +43,22 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/api/sources")
+def api_sources():
+    try:
+        data = client.realtime_settings()
+    except requests.RequestException as exc:
+        return jsonify({"error": str(exc)}), 502
+    names = []
+    for stream in data.get("rtsp", {}).get("streams", []):
+        if stream.get("enabled", True) and stream.get("name"):
+            names.append(stream["name"])
+    for source in data.get("audio", {}).get("sources", []):
+        if source.get("name"):
+            names.append(source["name"])
+    return jsonify({"sources": names})
+
+
 @app.route("/api/search", methods=["POST"])
 def api_search():
     payload = build_payload(request.get_json(force=True) or {})

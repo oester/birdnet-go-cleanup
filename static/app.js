@@ -194,3 +194,22 @@ el("confirm-cancel").addEventListener("click", closeConfirm);
 el("confirm-ok").addEventListener("click", doDelete);
 el("prev-page-btn").addEventListener("click", () => runSearch(state.currentPage - 1));
 el("next-page-btn").addEventListener("click", () => runSearch(state.currentPage + 1));
+
+async function loadSources() {
+  try {
+    const resp = await fetch("/api/sources");
+    if (!resp.ok) throw new Error(`Sources failed (${resp.status})`);
+    const data = await resp.json();
+    const select = el("f-device");
+    for (const name of data.sources || []) {
+      const opt = document.createElement("option");
+      opt.value = name;
+      opt.textContent = name;
+      select.appendChild(opt);
+    }
+  } catch (err) {
+    showToast(`Couldn't load sources: ${err.message}`);
+  }
+}
+
+loadSources();
