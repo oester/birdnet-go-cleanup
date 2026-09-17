@@ -38,6 +38,23 @@ def build_payload(form: dict) -> dict:
     return payload
 
 
+def sweep_search(payload: dict) -> tuple[list[dict], bool]:
+    """Fetches every page of a filtered search. Returns (all results, truncated)."""
+    payload = dict(payload)
+    payload["page"] = 1
+    all_results: list[dict] = []
+    for _ in range(MAX_SWEEP_PAGES):
+        data = client.search(payload)
+        results = data.get("results", [])
+        all_results.extend(results)
+        pages = data.get("pages", 1)
+        current = data.get("currentPage", payload["page"])
+        if not results or current >= pages:
+            return all_results, False
+        payload["page"] = current + 1
+    return all_results, True
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -72,21 +89,11 @@ def api_search():
 @app.route("/api/search_all_ids", methods=["POST"])
 def api_search_all_ids():
     payload = build_payload(request.get_json(force=True) or {})
-    payload["page"] = 1
-    ids: list[str] = []
-    for _ in range(MAX_SWEEP_PAGES):
-        try:
-            data = client.search(payload)
-        except requests.RequestException as exc:
-            return jsonify({"error": str(exc)}), 502
-        results = data.get("results", [])
-        ids.extend(r["id"] for r in results)
-        pages = data.get("pages", 1)
-        current = data.get("currentPage", payload["page"])
-        if not results or current >= pages:
-            break
-        payload["page"] = current + 1
-    return jsonify({"ids": ids, "total": len(ids)})
+    try:
+        all_results, _truncated = sweep_search(payload)
+    except requests.RequestException as exc:
+        return jsonify({"error": str(exc)}), 502
+    return jsonify({"ids": [r["id"] for r in all_results], "total": len(all_results)})
 
 
 COUNT_OPS = {
@@ -125,22 +132,10 @@ def api_search_by_count():
         return jsonify({"error": "countValue must be an integer"}), 400
 
     payload = build_payload(body)
-    payload["page"] = 1
-    all_results: list[dict] = []
-    truncated = True
-    for _ in range(MAX_SWEEP_PAGES):
-        try:
-            data = client.search(payload)
-        except requests.RequestException as exc:
-            return jsonify({"error": str(exc)}), 502
-        results = data.get("results", [])
-        all_results.extend(results)
-        pages = data.get("pages", 1)
-        current = data.get("currentPage", payload["page"])
-        if not results or current >= pages:
-            truncated = False
-            break
-        payload["page"] = current + 1
+    try:
+        all_results, truncated = sweep_search(payload)
+    except requests.RequestException as exc:
+        return jsonify({"error": str(exc)}), 502
 
     groups: dict[str, list[dict]] = {}
     for r in all_results:
@@ -164,6 +159,70 @@ def api_search_by_count():
         "results": matched,
         "total": len(matched),
         "speciesMatched": species_matched,
+        "truncated": truncated,
+    })
+
+
+# Same sweep as /api/search_by_count, but returns one row per species
+# (count + first/last seen + avg confidence) instead of individual
+# detections — for "just show me the counts" queries. The optional
+# countOp/countValue still narrows which species rows come back, e.g.
+# "species with fewer than 5 nighttime detections in the last 30 days,
+# as a list of species" rather than every one of their detections.
+@app.route("/api/search_summary", methods=["POST"])
+def api_search_summary():
+    body = request.get_json(force=True) or {}
+    payload = build_payload(body)
+    try:
+        all_results, truncated = sweep_search(payload)
+    except requests.RequestException as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    groups: dict[str, dict] = {}
+    for r in all_results:
+        key = r.get("scientificName", "")
+        g = groups.get(key)
+        if g is None:
+            g = {
+                "scientificName": key,
+                "commonName": r.get("commonName", ""),
+                "count": 0,
+                "_confidenceSum": 0.0,
+                "firstSeen": None,
+                "lastSeen": None,
+            }
+            groups[key] = g
+        g["count"] += 1
+        g["_confidenceSum"] += r.get("confidence") or 0
+        ts = r.get("timestamp") or ""
+        if ts and (g["firstSeen"] is None or ts < g["firstSeen"]):
+            g["firstSeen"] = ts
+        if ts and (g["lastSeen"] is None or ts > g["lastSeen"]):
+            g["lastSeen"] = ts
+
+    summaries = []
+    for g in groups.values():
+        g["avgConfidence"] = g["_confidenceSum"] / g["count"] if g["count"] else 0
+        del g["_confidenceSum"]
+        summaries.append(g)
+
+    count_op = body.get("countOp")
+    if count_op:
+        if count_op not in COUNT_OPS:
+            return jsonify({"error": "countOp must be one of lt/lte/gt/gte/eq"}), 400
+        try:
+            count_value = int(body.get("countValue"))
+        except (TypeError, ValueError):
+            return jsonify({"error": "countValue must be an integer"}), 400
+        op_fn = COUNT_OPS[count_op]
+        summaries = [s for s in summaries if op_fn(s["count"], count_value)]
+
+    summaries.sort(key=lambda s: s["count"])  # rarest species first by default
+
+    return jsonify({
+        "summaries": summaries,
+        "speciesCount": len(summaries),
+        "totalDetections": len(all_results),
         "truncated": truncated,
     })
 

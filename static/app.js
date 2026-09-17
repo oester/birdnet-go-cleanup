@@ -11,7 +11,13 @@ const state = {
   pages: 1,
   currentPage: 1,
   selectedIds: new Set(),
+  summaries: [],
+  summarySort: { key: "count", asc: true },
 };
+
+function viewMode() {
+  return document.querySelector('input[name="view-mode"]:checked').value;
+}
 
 function gatherFilters() {
   const confMin = Number(el("f-conf-min").value || 0) / 100;
@@ -49,6 +55,10 @@ function showToast(msg, ms = 4000) {
 }
 
 async function runSearch(page = 1) {
+  if (viewMode() === "summary") {
+    await runSummarySearch();
+    return;
+  }
   state.filters = gatherFilters();
   const countFilter = gatherCountFilter();
   const btn = el("search-btn");
@@ -103,6 +113,103 @@ function applyGroupedPage() {
   render();
 }
 
+async function runSummarySearch() {
+  state.filters = gatherFilters();
+  const countFilter = gatherCountFilter();
+  const btn = el("search-btn");
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/search_summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...state.filters, ...(countFilter || {}) }),
+    });
+    if (!resp.ok) throw new Error(`Search failed (${resp.status})`);
+    const data = await resp.json();
+    state.summaries = data.summaries || [];
+    if (data.truncated) {
+      showToast(
+        "Swept the maximum number of pages without finishing — narrow the date range or other filters for complete results.",
+        7000
+      );
+    }
+    renderSummary(data);
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function sortedSummaries() {
+  const { key, asc } = state.summarySort;
+  const rows = [...state.summaries];
+  rows.sort((a, b) => {
+    const av = a[key] ?? (typeof a[key] === "number" ? 0 : "");
+    const bv = b[key] ?? (typeof b[key] === "number" ? 0 : "");
+    if (av < bv) return asc ? -1 : 1;
+    if (av > bv) return asc ? 1 : -1;
+    return 0;
+  });
+  return rows;
+}
+
+function renderSummary(data) {
+  el("results-section").hidden = true;
+  el("summary-section").hidden = false;
+  el("summary-info").textContent =
+    `${data.speciesCount} species, ${data.totalDetections} detections matching the current filters`;
+
+  const body = el("summary-body");
+  body.innerHTML = "";
+  for (const s of sortedSummaries()) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${s.commonName ?? ""} <em>(${s.scientificName ?? ""})</em></td>
+      <td>${s.count}</td>
+      <td>${fmtTime(s.firstSeen)}</td>
+      <td>${fmtTime(s.lastSeen)}</td>
+      <td>${Math.round((s.avgConfidence ?? 0) * 100)}%</td>
+      <td><button type="button" class="view-detections-btn">View detections</button></td>
+    `;
+    tr.querySelector(".view-detections-btn").addEventListener("click", () => {
+      viewSpeciesDetections(s.commonName);
+    });
+    body.appendChild(tr);
+  }
+
+  document.querySelectorAll("#summary-table th[data-sort]").forEach((th) => {
+    th.textContent = th.textContent.replace(/ [▲▼]$/, "");
+    if (th.dataset.sort === state.summarySort.key) {
+      th.textContent += state.summarySort.asc ? " ▲" : " ▼";
+    }
+  });
+}
+
+function viewSpeciesDetections(commonName) {
+  el("f-species").value = commonName;
+  el("f-count-op").value = "";
+  el("f-count-value").value = "";
+  el("f-view-individual").checked = true;
+  state.selectedIds.clear();
+  runSearch(1);
+}
+
+document.querySelectorAll("#summary-table th[data-sort]").forEach((th) => {
+  th.addEventListener("click", () => {
+    const key = th.dataset.sort;
+    if (state.summarySort.key === key) {
+      state.summarySort.asc = !state.summarySort.asc;
+    } else {
+      state.summarySort = { key, asc: true };
+    }
+    renderSummary({
+      speciesCount: state.summaries.length,
+      totalDetections: state.summaries.reduce((sum, s) => sum + s.count, 0),
+    });
+  });
+});
+
 function fmtTime(iso) {
   try {
     return new Date(iso).toLocaleString();
@@ -113,6 +220,7 @@ function fmtTime(iso) {
 
 function render() {
   el("results-section").hidden = false;
+  el("summary-section").hidden = true;
   const body = el("results-body");
   body.innerHTML = "";
   for (const r of state.results) {

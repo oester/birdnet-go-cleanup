@@ -12,6 +12,10 @@
   </header>
 
   <form id="filters">
+    <div class="view-toggle">
+      <label><input type="radio" name="view-mode" id="f-view-individual" value="individual" checked> Individual detections</label>
+      <label><input type="radio" name="view-mode" id="f-view-summary" value="summary"> Species summary</label>
+    </div>
     <div class="filter-grid">
       <label>Species
         <input type="text" id="f-species" placeholder="e.g. Blue Jay">
@@ -85,6 +89,12 @@
       nighttime detection in a date range), then keeps only the species
       whose total meets the condition — useful for finding rare/one-off
       misidentifications. Leave it on "(no filter)" for an ordinary search.
+      <strong>Species summary</strong> shows one row per species with its
+      count instead of every individual detection — combine it with a
+      count condition for "just the rare species," or leave the count
+      filter off to see counts for everything matching the other filters.
+      Summary rows aren't selectable for delete; use "View detections" on
+      a row to drop into the individual view for that species.
     </p>
     <div class="filter-actions">
       <button type="submit" id="search-btn">Search</button>
@@ -125,6 +135,25 @@
       <span id="page-indicator"></span>
       <button type="button" id="next-page-btn">Next &raquo;</button>
     </div>
+  </section>
+
+  <section id="summary-section" hidden>
+    <div class="toolbar">
+      <span id="summary-info"></span>
+    </div>
+    <table id="summary-table">
+      <thead>
+        <tr>
+          <th data-sort="commonName">Species</th>
+          <th data-sort="count">Count</th>
+          <th data-sort="firstSeen">First seen</th>
+          <th data-sort="lastSeen">Last seen</th>
+          <th data-sort="avgConfidence">Avg conf.</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="summary-body"></tbody>
+    </table>
   </section>
 
   <div id="confirm-modal" class="modal-overlay" hidden>
