@@ -65,7 +65,27 @@
           <option value="confidence_desc">Highest Confidence</option>
         </select>
       </label>
+      <label>Species detection count
+        <div class="count-filter">
+          <select id="f-count-op">
+            <option value="">(no filter)</option>
+            <option value="lt">fewer than</option>
+            <option value="lte">at most</option>
+            <option value="gt">more than</option>
+            <option value="gte">at least</option>
+            <option value="eq">exactly</option>
+          </select>
+          <input type="number" id="f-count-value" min="0" placeholder="e.g. 5">
+        </div>
+      </label>
     </div>
+    <p class="filter-hint">
+      "Species detection count" counts each species' matches across
+      <strong>all</strong> pages of the other filters above (e.g. every
+      nighttime detection in a date range), then keeps only the species
+      whose total meets the condition — useful for finding rare/one-off
+      misidentifications. Leave it on "(no filter)" for an ordinary search.
+    </p>
     <div class="filter-actions">
       <button type="submit" id="search-btn">Search</button>
       <button type="button" id="reset-btn">Reset</button>
@@ -94,6 +114,7 @@
           <th>Verified</th>
           <th>Source</th>
           <th>Audio</th>
+          <th title="Species' total count within the current filters, only shown for a detection-count search">Species count</th>
         </tr>
       </thead>
       <tbody id="results-body"></tbody>

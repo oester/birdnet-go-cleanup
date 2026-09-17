@@ -53,6 +53,26 @@ form#filters {
   font-size: 0.9rem;
 }
 
+.count-filter {
+  display: flex;
+  gap: 6px;
+}
+
+.count-filter select {
+  flex: 1;
+}
+
+.count-filter input {
+  width: 70px;
+}
+
+.filter-hint {
+  margin: 12px 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  max-width: 640px;
+}
+
 .filter-actions {
   margin-top: 14px;
   display: flex;

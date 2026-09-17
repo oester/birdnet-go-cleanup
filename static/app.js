@@ -1,8 +1,12 @@
 const el = (id) => document.getElementById(id);
 
+const GROUPED_PAGE_SIZE = 20;
+
 const state = {
+  mode: "normal", // "normal" (server-paginated) or "grouped" (species-count filtered, paginated client-side)
   filters: null,
   results: [],
+  allResults: [], // grouped mode only: the full flattened, already-filtered set
   total: 0,
   pages: 1,
   currentPage: 1,
@@ -27,6 +31,15 @@ function gatherFilters() {
   };
 }
 
+function gatherCountFilter() {
+  const op = el("f-count-op").value;
+  const raw = el("f-count-value").value;
+  if (!op || raw === "") return null;
+  const value = Math.floor(Number(raw));
+  if (!Number.isFinite(value) || value < 0) return null;
+  return { countOp: op, countValue: value };
+}
+
 function showToast(msg, ms = 4000) {
   const t = el("toast");
   t.textContent = msg;
@@ -37,26 +50,57 @@ function showToast(msg, ms = 4000) {
 
 async function runSearch(page = 1) {
   state.filters = gatherFilters();
+  const countFilter = gatherCountFilter();
   const btn = el("search-btn");
   btn.disabled = true;
   try {
-    const resp = await fetch("/api/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...state.filters, page }),
-    });
-    if (!resp.ok) throw new Error(`Search failed (${resp.status})`);
-    const data = await resp.json();
-    state.results = data.results || [];
-    state.total = data.total || 0;
-    state.pages = data.pages || 1;
-    state.currentPage = data.currentPage || page;
-    render();
+    if (countFilter) {
+      const resp = await fetch("/api/search_by_count", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...state.filters, ...countFilter }),
+      });
+      if (!resp.ok) throw new Error(`Search failed (${resp.status})`);
+      const data = await resp.json();
+      state.mode = "grouped";
+      state.allResults = data.results || [];
+      state.total = data.total || 0;
+      state.pages = Math.max(1, Math.ceil(state.allResults.length / GROUPED_PAGE_SIZE));
+      state.currentPage = Math.min(Math.max(1, page), state.pages);
+      if (data.truncated) {
+        showToast(
+          "Swept the maximum number of pages without finishing — narrow the date range or other filters for complete results.",
+          7000
+        );
+      }
+      applyGroupedPage();
+    } else {
+      const resp = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...state.filters, page }),
+      });
+      if (!resp.ok) throw new Error(`Search failed (${resp.status})`);
+      const data = await resp.json();
+      state.mode = "normal";
+      state.allResults = [];
+      state.results = data.results || [];
+      state.total = data.total || 0;
+      state.pages = data.pages || 1;
+      state.currentPage = data.currentPage || page;
+      render();
+    }
   } catch (err) {
     showToast(err.message);
   } finally {
     btn.disabled = false;
   }
+}
+
+function applyGroupedPage() {
+  const start = (state.currentPage - 1) * GROUPED_PAGE_SIZE;
+  state.results = state.allResults.slice(start, start + GROUPED_PAGE_SIZE);
+  render();
 }
 
 function fmtTime(iso) {
@@ -84,6 +128,7 @@ function render() {
       <td>${r.verified ?? ""}</td>
       <td>${r.source ?? r.device ?? ""}</td>
       <td>${r.hasAudio ? "♪" : ""}</td>
+      <td>${r.speciesCount ?? ""}</td>
     `;
     tr.querySelector(".row-check").addEventListener("change", (e) => {
       toggleSelection(r.id, e.target.checked);
@@ -117,6 +162,12 @@ function selectPage() {
 }
 
 async function selectAllMatching() {
+  if (state.mode === "grouped") {
+    state.selectedIds = new Set(state.allResults.map((r) => r.id));
+    render();
+    showToast(`Selected ${state.selectedIds.size} matching detections`);
+    return;
+  }
   const btn = el("select-all-btn");
   btn.disabled = true;
   try {
@@ -168,7 +219,19 @@ async function doDelete() {
     const data = await resp.json();
     state.selectedIds.clear();
     showToast(`Deleted ${data.deleted}, failed ${data.failed}`);
-    await runSearch(state.currentPage);
+    if (state.mode === "grouped") {
+      const failedSet = new Set((data.failed_ids || []).map(String));
+      const attempted = new Set(ids);
+      state.allResults = state.allResults.filter(
+        (r) => !attempted.has(r.id) || failedSet.has(r.id)
+      );
+      state.total = state.allResults.length;
+      state.pages = Math.max(1, Math.ceil(state.allResults.length / GROUPED_PAGE_SIZE));
+      state.currentPage = Math.min(state.currentPage, state.pages);
+      applyGroupedPage();
+    } else {
+      await runSearch(state.currentPage);
+    }
   } catch (err) {
     showToast(err.message);
   }
@@ -192,8 +255,22 @@ el("clear-selection-btn").addEventListener("click", clearSelection);
 el("delete-btn").addEventListener("click", openConfirm);
 el("confirm-cancel").addEventListener("click", closeConfirm);
 el("confirm-ok").addEventListener("click", doDelete);
-el("prev-page-btn").addEventListener("click", () => runSearch(state.currentPage - 1));
-el("next-page-btn").addEventListener("click", () => runSearch(state.currentPage + 1));
+el("prev-page-btn").addEventListener("click", () => {
+  if (state.mode === "grouped") {
+    state.currentPage = Math.max(1, state.currentPage - 1);
+    applyGroupedPage();
+  } else {
+    runSearch(state.currentPage - 1);
+  }
+});
+el("next-page-btn").addEventListener("click", () => {
+  if (state.mode === "grouped") {
+    state.currentPage = Math.min(state.pages, state.currentPage + 1);
+    applyGroupedPage();
+  } else {
+    runSearch(state.currentPage + 1);
+  }
+});
 
 async function loadSources() {
   try {
