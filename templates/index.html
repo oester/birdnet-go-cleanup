@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BirdNET-Go Cleanup</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>BirdNET-Go DB Cleanup</h1>
+  </header>
+
+  <form id="filters">
+    <div class="filter-grid">
+      <label>Species
+        <input type="text" id="f-species" placeholder="e.g. Blue Jay">
+      </label>
+      <label>Source / device
+        <input type="text" id="f-device" placeholder="e.g. Garage 2 North">
+      </label>
+      <label>Date start
+        <input type="date" id="f-date-start">
+      </label>
+      <label>Date end
+        <input type="date" id="f-date-end">
+      </label>
+      <label>Confidence min %
+        <input type="number" id="f-conf-min" min="0" max="100" value="0">
+      </label>
+      <label>Confidence max %
+        <input type="number" id="f-conf-max" min="0" max="100" value="100">
+      </label>
+      <label>Verified
+        <select id="f-verified">
+          <option value="any">Any</option>
+          <option value="correct">Verified</option>
+          <option value="false_positive">False Positive</option>
+          <option value="unverified">Unverified</option>
+        </select>
+      </label>
+      <label>Locked
+        <select id="f-locked">
+          <option value="any">Any</option>
+          <option value="locked">Locked</option>
+          <option value="unlocked">Unlocked</option>
+        </select>
+      </label>
+      <label>Time of day
+        <select id="f-tod">
+          <option value="any">Any</option>
+          <option value="dawn">Dawn</option>
+          <option value="day">Daytime</option>
+          <option value="dusk">Dusk</option>
+          <option value="night">Nighttime</option>
+        </select>
+      </label>
+      <label>Sort
+        <select id="f-sort">
+          <option value="date_desc">Newest First</option>
+          <option value="date_asc">Oldest First</option>
+          <option value="species_asc">Species (A-Z)</option>
+          <option value="confidence_desc">Highest Confidence</option>
+        </select>
+      </label>
+    </div>
+    <div class="filter-actions">
+      <button type="submit" id="search-btn">Search</button>
+      <button type="button" id="reset-btn">Reset</button>
+    </div>
+  </form>
+
+  <section id="results-section" hidden>
+    <div class="toolbar">
+      <span id="result-summary"></span>
+      <span class="spacer"></span>
+      <button type="button" id="select-page-btn">Select page</button>
+      <button type="button" id="select-all-btn">Select all matching</button>
+      <button type="button" id="clear-selection-btn">Clear selection</button>
+      <span id="selection-count"></span>
+      <button type="button" id="delete-btn" class="danger" disabled>Delete Selected</button>
+    </div>
+
+    <table id="results-table">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Time</th>
+          <th>Common name</th>
+          <th>Scientific name</th>
+          <th>Conf.</th>
+          <th>Verified</th>
+          <th>Source</th>
+          <th>Audio</th>
+        </tr>
+      </thead>
+      <tbody id="results-body"></tbody>
+    </table>
+
+    <div class="pagination">
+      <button type="button" id="prev-page-btn">&laquo; Prev</button>
+      <span id="page-indicator"></span>
+      <button type="button" id="next-page-btn">Next &raquo;</button>
+    </div>
+  </section>
+
+  <div id="confirm-modal" class="modal-overlay" hidden>
+    <div class="modal">
+      <p id="confirm-text"></p>
+      <div class="modal-actions">
+        <button type="button" id="confirm-cancel">Cancel</button>
+        <button type="button" id="confirm-ok" class="danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

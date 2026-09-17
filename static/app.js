@@ -1,0 +1,196 @@
+const el = (id) => document.getElementById(id);
+
+const state = {
+  filters: null,
+  results: [],
+  total: 0,
+  pages: 1,
+  currentPage: 1,
+  selectedIds: new Set(),
+};
+
+function gatherFilters() {
+  const confMin = Number(el("f-conf-min").value || 0) / 100;
+  const confMax = Number(el("f-conf-max").value || 100) / 100;
+  return {
+    species: el("f-species").value.trim(),
+    speciesScientific: [],
+    dateStart: el("f-date-start").value || "",
+    dateEnd: el("f-date-end").value || "",
+    confidenceMin: Math.min(confMin, confMax),
+    confidenceMax: Math.max(confMin, confMax),
+    verifiedStatus: el("f-verified").value,
+    lockedStatus: el("f-locked").value,
+    deviceFilter: el("f-device").value.trim(),
+    timeOfDay: el("f-tod").value,
+    sortBy: el("f-sort").value,
+  };
+}
+
+function showToast(msg, ms = 4000) {
+  const t = el("toast");
+  t.textContent = msg;
+  t.hidden = false;
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => { t.hidden = true; }, ms);
+}
+
+async function runSearch(page = 1) {
+  state.filters = gatherFilters();
+  const btn = el("search-btn");
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...state.filters, page }),
+    });
+    if (!resp.ok) throw new Error(`Search failed (${resp.status})`);
+    const data = await resp.json();
+    state.results = data.results || [];
+    state.total = data.total || 0;
+    state.pages = data.pages || 1;
+    state.currentPage = data.currentPage || page;
+    render();
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function fmtTime(iso) {
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
+function render() {
+  el("results-section").hidden = false;
+  const body = el("results-body");
+  body.innerHTML = "";
+  for (const r of state.results) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = r.id;
+    if (state.selectedIds.has(r.id)) tr.classList.add("selected");
+    tr.innerHTML = `
+      <td><input type="checkbox" class="row-check" ${state.selectedIds.has(r.id) ? "checked" : ""}></td>
+      <td>${fmtTime(r.timestamp)}</td>
+      <td>${r.commonName ?? ""}</td>
+      <td><em>${r.scientificName ?? ""}</em></td>
+      <td>${Math.round((r.confidence ?? 0) * 100)}%</td>
+      <td>${r.verified ?? ""}</td>
+      <td>${r.source ?? r.device ?? ""}</td>
+      <td>${r.hasAudio ? "♪" : ""}</td>
+    `;
+    tr.querySelector(".row-check").addEventListener("change", (e) => {
+      toggleSelection(r.id, e.target.checked);
+    });
+    body.appendChild(tr);
+  }
+  el("result-summary").textContent = `${state.total} matching detection${state.total === 1 ? "" : "s"}`;
+  el("page-indicator").textContent = `Page ${state.currentPage} of ${state.pages}`;
+  el("prev-page-btn").disabled = state.currentPage <= 1;
+  el("next-page-btn").disabled = state.currentPage >= state.pages;
+  updateSelectionUI();
+}
+
+function toggleSelection(id, checked) {
+  if (checked) state.selectedIds.add(id);
+  else state.selectedIds.delete(id);
+  const row = document.querySelector(`tr[data-id="${id}"]`);
+  if (row) row.classList.toggle("selected", checked);
+  updateSelectionUI();
+}
+
+function updateSelectionUI() {
+  const n = state.selectedIds.size;
+  el("selection-count").textContent = n > 0 ? `${n} selected` : "";
+  el("delete-btn").disabled = n === 0;
+}
+
+function selectPage() {
+  for (const r of state.results) state.selectedIds.add(r.id);
+  render();
+}
+
+async function selectAllMatching() {
+  const btn = el("select-all-btn");
+  btn.disabled = true;
+  try {
+    const resp = await fetch("/api/search_all_ids", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(state.filters),
+    });
+    if (!resp.ok) throw new Error(`Lookup failed (${resp.status})`);
+    const data = await resp.json();
+    state.selectedIds = new Set(data.ids || []);
+    render();
+    showToast(`Selected ${state.selectedIds.size} matching detections`);
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function clearSelection() {
+  state.selectedIds.clear();
+  render();
+}
+
+function openConfirm() {
+  const n = state.selectedIds.size;
+  if (n === 0) return;
+  el("confirm-text").textContent =
+    `Delete ${n} detection${n === 1 ? "" : "s"}? This cannot be undone.`;
+  el("confirm-modal").hidden = false;
+}
+
+function closeConfirm() {
+  el("confirm-modal").hidden = true;
+}
+
+async function doDelete() {
+  closeConfirm();
+  const ids = Array.from(state.selectedIds);
+  el("delete-btn").disabled = true;
+  try {
+    const resp = await fetch("/api/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    });
+    if (!resp.ok) throw new Error(`Delete failed (${resp.status})`);
+    const data = await resp.json();
+    state.selectedIds.clear();
+    showToast(`Deleted ${data.deleted}, failed ${data.failed}`);
+    await runSearch(state.currentPage);
+  } catch (err) {
+    showToast(err.message);
+  }
+}
+
+el("filters").addEventListener("submit", (e) => {
+  e.preventDefault();
+  state.selectedIds.clear();
+  runSearch(1);
+});
+
+el("reset-btn").addEventListener("click", () => {
+  el("filters").reset();
+  el("f-conf-min").value = 0;
+  el("f-conf-max").value = 100;
+});
+
+el("select-page-btn").addEventListener("click", selectPage);
+el("select-all-btn").addEventListener("click", selectAllMatching);
+el("clear-selection-btn").addEventListener("click", clearSelection);
+el("delete-btn").addEventListener("click", openConfirm);
+el("confirm-cancel").addEventListener("click", closeConfirm);
+el("confirm-ok").addEventListener("click", doDelete);
+el("prev-page-btn").addEventListener("click", () => runSearch(state.currentPage - 1));
+el("next-page-btn").addEventListener("click", () => runSearch(state.currentPage + 1));
