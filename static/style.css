@@ -134,6 +134,10 @@ tr.selected { background: #eaf3ee; }
   justify-content: center;
 }
 
+.modal-overlay[hidden] {
+  display: none;
+}
+
 .modal {
   background: #fff;
   padding: 20px;
