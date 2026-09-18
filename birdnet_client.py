@@ -59,3 +59,17 @@ class BirdnetClient:
         resp = self.session.get(f"{self.base_url}/settings/realtime", timeout=self.timeout)
         resp.raise_for_status()
         return resp.json()
+
+    def list_ignored_species(self) -> list[str]:
+        resp = self.session.get(f"{self.base_url}/detections/ignored", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json().get("species", [])
+
+    # The server endpoint is a TOGGLE (add if absent, remove if present) —
+    # callers must check list_ignored_species() first and only call this
+    # for names that aren't already excluded, or a species could get
+    # silently un-excluded instead of excluded.
+    def add_ignored_species(self, common_name: str) -> dict:
+        resp = self._request("POST", "/detections/ignore", json={"common_name": common_name})
+        resp.raise_for_status()
+        return resp.json()

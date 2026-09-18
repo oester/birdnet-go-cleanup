@@ -11,6 +11,7 @@ const state = {
   pages: 1,
   currentPage: 1,
   selectedIds: new Set(),
+  speciesById: new Map(), // id -> commonName, for any detection we've ever fetched full data for
   summaries: [],
   summarySort: { key: "count", asc: true },
 };
@@ -74,6 +75,7 @@ async function runSearch(page = 1) {
       const data = await resp.json();
       state.mode = "grouped";
       state.allResults = data.results || [];
+      for (const r of state.allResults) state.speciesById.set(r.id, r.commonName);
       state.total = data.total || 0;
       state.pages = Math.max(1, Math.ceil(state.allResults.length / GROUPED_PAGE_SIZE));
       state.currentPage = Math.min(Math.max(1, page), state.pages);
@@ -224,6 +226,7 @@ function render() {
   const body = el("results-body");
   body.innerHTML = "";
   for (const r of state.results) {
+    state.speciesById.set(r.id, r.commonName);
     const tr = document.createElement("tr");
     tr.dataset.id = r.id;
     if (state.selectedIds.has(r.id)) tr.classList.add("selected");
@@ -262,6 +265,7 @@ function updateSelectionUI() {
   const n = state.selectedIds.size;
   el("selection-count").textContent = n > 0 ? `${n} selected` : "";
   el("delete-btn").disabled = n === 0;
+  el("exclude-btn").disabled = n === 0;
 }
 
 function selectPage() {
@@ -287,6 +291,9 @@ async function selectAllMatching() {
     if (!resp.ok) throw new Error(`Lookup failed (${resp.status})`);
     const data = await resp.json();
     state.selectedIds = new Set(data.ids || []);
+    for (const [id, name] of Object.entries(data.commonNames || {})) {
+      if (name) state.speciesById.set(id, name);
+    }
     render();
     showToast(`Selected ${state.selectedIds.size} matching detections`);
   } catch (err) {
@@ -301,20 +308,80 @@ function clearSelection() {
   render();
 }
 
-function openConfirm() {
-  const n = state.selectedIds.size;
-  if (n === 0) return;
-  el("confirm-text").textContent =
-    `Delete ${n} detection${n === 1 ? "" : "s"}? This cannot be undone.`;
+let pendingConfirmAction = null;
+
+function openConfirmDialog(text, action) {
+  el("confirm-text").textContent = text;
+  pendingConfirmAction = action;
   el("confirm-modal").hidden = false;
 }
 
 function closeConfirm() {
   el("confirm-modal").hidden = true;
+  pendingConfirmAction = null;
+}
+
+function openDeleteConfirm() {
+  const n = state.selectedIds.size;
+  if (n === 0) return;
+  openConfirmDialog(
+    `Delete ${n} detection${n === 1 ? "" : "s"}? This cannot be undone.`,
+    doDelete
+  );
+}
+
+function distinctSelectedSpecies() {
+  const names = new Set();
+  for (const id of state.selectedIds) {
+    const name = state.speciesById.get(id);
+    if (name) names.add(name);
+  }
+  return Array.from(names);
+}
+
+function openExcludeConfirm() {
+  const names = distinctSelectedSpecies();
+  const unresolved = [...state.selectedIds].filter((id) => !state.speciesById.has(id)).length;
+  if (names.length === 0) {
+    showToast("Could not determine the species for the current selection.");
+    return;
+  }
+  const label = names.length === 1 ? `"${names[0]}"` : `${names.length} species (${names.join(", ")})`;
+  const gap = unresolved > 0
+    ? ` (${unresolved} selected detection${unresolved === 1 ? "" : "s"} had an unknown species and will be skipped)`
+    : "";
+  openConfirmDialog(
+    `Add ${label} to the server's excluded-species list?${gap} This stops new detections of ` +
+      `${names.length === 1 ? "it" : "them"} from being recorded going forward — it does not delete anything.`,
+    doExcludeSelected
+  );
+}
+
+async function doExcludeSelected() {
+  const names = distinctSelectedSpecies();
+  if (names.length === 0) return;
+  el("exclude-btn").disabled = true;
+  try {
+    const resp = await fetch("/api/exclude_species", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ commonNames: names }),
+    });
+    if (!resp.ok) throw new Error(`Exclude failed (${resp.status})`);
+    const data = await resp.json();
+    const parts = [];
+    if (data.added?.length) parts.push(`excluded: ${data.added.join(", ")}`);
+    if (data.alreadyExcluded?.length) parts.push(`already excluded: ${data.alreadyExcluded.join(", ")}`);
+    if (data.failed?.length) parts.push(`failed: ${data.failed.join(", ")}`);
+    showToast(parts.join(" · ") || "No changes", 6000);
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    updateSelectionUI();
+  }
 }
 
 async function doDelete() {
-  closeConfirm();
   const ids = Array.from(state.selectedIds);
   el("delete-btn").disabled = true;
   try {
@@ -375,9 +442,14 @@ el("reset-btn").addEventListener("click", () => {
 el("select-page-btn").addEventListener("click", selectPage);
 el("select-all-btn").addEventListener("click", selectAllMatching);
 el("clear-selection-btn").addEventListener("click", clearSelection);
-el("delete-btn").addEventListener("click", openConfirm);
+el("delete-btn").addEventListener("click", openDeleteConfirm);
+el("exclude-btn").addEventListener("click", openExcludeConfirm);
 el("confirm-cancel").addEventListener("click", closeConfirm);
-el("confirm-ok").addEventListener("click", doDelete);
+el("confirm-ok").addEventListener("click", () => {
+  const action = pendingConfirmAction;
+  closeConfirm();
+  if (action) action();
+});
 el("prev-page-btn").addEventListener("click", () => {
   if (state.mode === "grouped") {
     state.currentPage = Math.max(1, state.currentPage - 1);

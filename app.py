@@ -93,7 +93,11 @@ def api_search_all_ids():
         all_results, _truncated = sweep_search(payload)
     except requests.RequestException as exc:
         return jsonify({"error": str(exc)}), 502
-    return jsonify({"ids": [r["id"] for r in all_results], "total": len(all_results)})
+    return jsonify({
+        "ids": [r["id"] for r in all_results],
+        "commonNames": {r["id"]: r.get("commonName", "") for r in all_results},
+        "total": len(all_results),
+    })
 
 
 COUNT_OPS = {
@@ -239,6 +243,51 @@ def api_delete():
         else:
             failed_ids.append(detection_id)
     return jsonify({"deleted": deleted, "failed": len(failed_ids), "failed_ids": failed_ids})
+
+
+# BirdNET-Go's POST /detections/ignore is a TOGGLE, not an idempotent add —
+# calling it once per selected detection (instead of once per distinct
+# species) would flip the same species excluded/included/excluded/... on
+# every other call. This dedupes to the distinct commonNames the frontend
+# sends, checks the current ignore list once, and only calls the toggle for
+# names that aren't already excluded — so selecting 40 detections of the
+# same species results in exactly one (correct) toggle call, not 40.
+@app.route("/api/exclude_species", methods=["POST"])
+def api_exclude_species():
+    body = request.get_json(force=True) or {}
+    seen = set()
+    distinct_names = []
+    for name in body.get("commonNames", []):
+        name = (name or "").strip()
+        if name and name not in seen:
+            seen.add(name)
+            distinct_names.append(name)
+
+    try:
+        already_ignored = set(client.list_ignored_species())
+    except requests.RequestException as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    added = []
+    already_excluded = []
+    failed = []
+    for name in distinct_names:
+        if name in already_ignored:
+            already_excluded.append(name)
+            continue
+        try:
+            result = client.add_ignored_species(name)
+        except requests.RequestException:
+            failed.append(name)
+            continue
+        if result.get("is_excluded"):
+            added.append(name)
+        else:
+            # Toggled the wrong direction (e.g. a race with another
+            # client) -- surface as failed rather than claim success.
+            failed.append(name)
+
+    return jsonify({"added": added, "alreadyExcluded": already_excluded, "failed": failed})
 
 
 if __name__ == "__main__":
