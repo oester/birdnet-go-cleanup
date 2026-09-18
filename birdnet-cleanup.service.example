@@ -1,0 +1,21 @@
+[Unit]
+Description=BirdNET-Go DB cleanup web tool
+After=network.target
+
+[Service]
+Type=simple
+# Replace with the user this should run as.
+User=YOUR_USER
+# Replace with the path you cloned/copied this repo to.
+WorkingDirectory=/path/to/birdnet-go-cleanup
+Environment=PORT=5055
+# http://localhost:8080/api/v2 is correct when this runs on the same
+# host as BirdNET-Go. Point it at BirdNET-Go's host/port otherwise —
+# see README.md for details.
+Environment=BIRDNET_BASE_URL=http://localhost:8080/api/v2
+ExecStart=/path/to/birdnet-go-cleanup/venv/bin/python /path/to/birdnet-go-cleanup/app.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
