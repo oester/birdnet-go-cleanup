@@ -355,6 +355,21 @@ el("reset-btn").addEventListener("click", () => {
   el("filters").reset();
   el("f-conf-min").value = 0;
   el("f-conf-max").value = 100;
+
+  state.mode = "normal";
+  state.filters = null;
+  state.results = [];
+  state.allResults = [];
+  state.summaries = [];
+  state.total = 0;
+  state.pages = 1;
+  state.currentPage = 1;
+  state.selectedIds.clear();
+
+  el("results-section").hidden = true;
+  el("summary-section").hidden = true;
+  el("results-body").innerHTML = "";
+  el("summary-body").innerHTML = "";
 });
 
 el("select-page-btn").addEventListener("click", selectPage);
