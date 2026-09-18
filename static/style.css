@@ -132,6 +132,30 @@ button.danger {
   color: var(--muted);
 }
 
+.delete-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.progress-bar {
+  flex: 1;
+  height: 8px;
+  background: #e6e4df;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--danger);
+  transition: width 0.15s ease-out;
+}
+
 table#results-table,
 table#summary-table {
   width: 100%;

@@ -2,6 +2,14 @@ const el = (id) => document.getElementById(id);
 
 const GROUPED_PAGE_SIZE = 20;
 
+// Overwritten by loadConfig() from /api/config on startup — these are just
+// fallbacks in case that fetch fails, and should match app.py's constants.
+const config = {
+  maxSelection: 500,
+  deleteBatchSize: 25,
+  deleteThrottleSeconds: 0.05,
+};
+
 const state = {
   mode: "normal", // "normal" (server-paginated) or "grouped" (species-count filtered, paginated client-side)
   filters: null,
@@ -254,11 +262,37 @@ function render() {
 }
 
 function toggleSelection(id, checked) {
-  if (checked) state.selectedIds.add(id);
-  else state.selectedIds.delete(id);
+  if (checked) {
+    if (state.selectedIds.size >= config.maxSelection) {
+      showToast(`Selection is capped at ${config.maxSelection} — deselect something else first.`);
+      const row = document.querySelector(`tr[data-id="${id}"]`);
+      const cb = row?.querySelector(".row-check");
+      if (cb) cb.checked = false;
+      return;
+    }
+    state.selectedIds.add(id);
+  } else {
+    state.selectedIds.delete(id);
+  }
   const row = document.querySelector(`tr[data-id="${id}"]`);
   if (row) row.classList.toggle("selected", checked);
   updateSelectionUI();
+}
+
+// Sets the selection to `ids`, capped at config.maxSelection. Used by
+// "select all matching," which can otherwise pull in far more than the
+// cap allows in one shot.
+function applyCappedSelection(ids) {
+  state.selectedIds = new Set(ids.slice(0, config.maxSelection));
+  render();
+  if (ids.length > config.maxSelection) {
+    showToast(
+      `Selected ${config.maxSelection} of ${ids.length} matching detections — ${config.maxSelection} is the maximum at once. Narrow your filters to handle the rest.`,
+      7000
+    );
+  } else {
+    showToast(`Selected ${state.selectedIds.size} matching detections`);
+  }
 }
 
 function updateSelectionUI() {
@@ -269,15 +303,23 @@ function updateSelectionUI() {
 }
 
 function selectPage() {
-  for (const r of state.results) state.selectedIds.add(r.id);
+  let hitCap = false;
+  for (const r of state.results) {
+    if (state.selectedIds.size >= config.maxSelection) {
+      hitCap = true;
+      break;
+    }
+    state.selectedIds.add(r.id);
+  }
   render();
+  if (hitCap) {
+    showToast(`Selection is capped at ${config.maxSelection} — deselect something else first.`);
+  }
 }
 
 async function selectAllMatching() {
   if (state.mode === "grouped") {
-    state.selectedIds = new Set(state.allResults.map((r) => r.id));
-    render();
-    showToast(`Selected ${state.selectedIds.size} matching detections`);
+    applyCappedSelection(state.allResults.map((r) => r.id));
     return;
   }
   const btn = el("select-all-btn");
@@ -290,12 +332,10 @@ async function selectAllMatching() {
     });
     if (!resp.ok) throw new Error(`Lookup failed (${resp.status})`);
     const data = await resp.json();
-    state.selectedIds = new Set(data.ids || []);
     for (const [id, name] of Object.entries(data.commonNames || {})) {
       if (name) state.speciesById.set(id, name);
     }
-    render();
-    showToast(`Selected ${state.selectedIds.size} matching detections`);
+    applyCappedSelection(data.ids || []);
   } catch (err) {
     showToast(err.message);
   } finally {
@@ -321,11 +361,25 @@ function closeConfirm() {
   pendingConfirmAction = null;
 }
 
+const LARGE_DELETE_THRESHOLD = 50;
+
 function openDeleteConfirm() {
   const n = state.selectedIds.size;
   if (n === 0) return;
+  const s = n === 1 ? "" : "s";
+  if (n < LARGE_DELETE_THRESHOLD) {
+    openConfirmDialog(
+      `Delete ${n} detection${s}? This also removes their audio clips/spectrograms and cannot be undone.`,
+      doDelete
+    );
+    return;
+  }
+  const etaSeconds = Math.round(n * config.deleteThrottleSeconds);
   openConfirmDialog(
-    `Delete ${n} detection${n === 1 ? "" : "s"}? This cannot be undone.`,
+    `⚠️ Delete ${n} detections? This also removes their audio clips/spectrograms and cannot be undone. ` +
+      `A batch this size will take at least ~${etaSeconds}s and generates real database and file I/O on ` +
+      `your BirdNET-Go server, possibly alongside live detections being written at the same time — ` +
+      `narrow your filters first if you don't need all ${n} gone right now.`,
     doDelete
   );
 }
@@ -381,21 +435,60 @@ async function doExcludeSelected() {
   }
 }
 
+function setDeleteControlsDisabled(disabled) {
+  for (const id of ["search-btn", "reset-btn", "select-page-btn", "select-all-btn",
+                     "clear-selection-btn", "exclude-btn", "delete-btn",
+                     "prev-page-btn", "next-page-btn"]) {
+    el(id).disabled = disabled;
+  }
+  if (!disabled) updateSelectionUI(); // restores delete/exclude's normal enabled-when-selected state
+}
+
+function showDeleteProgress(done, total, failed) {
+  const box = el("delete-progress");
+  box.hidden = false;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  el("delete-progress-fill").style.width = `${pct}%`;
+  el("delete-progress-text").textContent =
+    `Deleting ${done} of ${total}${failed > 0 ? ` (${failed} failed)` : ""}…`;
+}
+
+function hideDeleteProgress() {
+  el("delete-progress").hidden = true;
+}
+
+// Sends the selected ids to the server in config.deleteBatchSize chunks
+// (server-side, each chunk is also throttled between individual deletes —
+// see DELETE_THROTTLE_SECONDS in app.py) instead of one giant request, so:
+// the UI can show real progress instead of freezing until everything is
+// done, and an interruption (closed tab, network drop) only loses the
+// in-flight batch rather than silently losing track of the whole operation.
 async function doDelete() {
   const ids = Array.from(state.selectedIds);
-  el("delete-btn").disabled = true;
+  setDeleteControlsDisabled(true);
+  let deleted = 0;
+  let failed = 0;
+  const failedIds = [];
+  showDeleteProgress(0, ids.length, 0);
   try {
-    const resp = await fetch("/api/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids }),
-    });
-    if (!resp.ok) throw new Error(`Delete failed (${resp.status})`);
-    const data = await resp.json();
+    for (let i = 0; i < ids.length; i += config.deleteBatchSize) {
+      const batch = ids.slice(i, i + config.deleteBatchSize);
+      const resp = await fetch("/api/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: batch }),
+      });
+      if (!resp.ok) throw new Error(`Delete failed (${resp.status}) after ${deleted} of ${ids.length}`);
+      const data = await resp.json();
+      deleted += data.deleted || 0;
+      failed += data.failed || 0;
+      failedIds.push(...(data.failed_ids || []));
+      showDeleteProgress(deleted + failed, ids.length, failed);
+    }
     state.selectedIds.clear();
-    showToast(`Deleted ${data.deleted}, failed ${data.failed}`);
+    showToast(`Deleted ${deleted}, failed ${failed}`, 6000);
     if (state.mode === "grouped") {
-      const failedSet = new Set((data.failed_ids || []).map(String));
+      const failedSet = new Set(failedIds.map(String));
       const attempted = new Set(ids);
       state.allResults = state.allResults.filter(
         (r) => !attempted.has(r.id) || failedSet.has(r.id)
@@ -408,7 +501,10 @@ async function doDelete() {
       await runSearch(state.currentPage);
     }
   } catch (err) {
-    showToast(err.message);
+    showToast(`${err.message} — ${deleted} deleted so far, stopped early.`, 8000);
+  } finally {
+    hideDeleteProgress();
+    setDeleteControlsDisabled(false);
   }
 }
 
@@ -467,6 +563,17 @@ el("next-page-btn").addEventListener("click", () => {
   }
 });
 
+async function loadConfig() {
+  try {
+    const resp = await fetch("/api/config");
+    if (!resp.ok) throw new Error(`Config failed (${resp.status})`);
+    const data = await resp.json();
+    Object.assign(config, data);
+  } catch (err) {
+    showToast(`Couldn't load config, using defaults: ${err.message}`);
+  }
+}
+
 async function loadSources() {
   try {
     const resp = await fetch("/api/sources");
@@ -484,4 +591,5 @@ async function loadSources() {
   }
 }
 
+loadConfig();
 loadSources();

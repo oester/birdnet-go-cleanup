@@ -1,4 +1,5 @@
 import os
+import time
 
 import requests
 from flask import Flask, jsonify, render_template, request
@@ -7,6 +8,9 @@ from birdnet_client import BirdnetClient
 
 BASE_URL = os.environ.get("BIRDNET_BASE_URL", "http://localhost:8080/api/v2")
 MAX_SWEEP_PAGES = 500  # safety cap for /api/search_all_ids
+MAX_SELECTION = 500  # absolute cap on how many detections can be selected/deleted at once
+DELETE_BATCH_SIZE = 25  # frontend sends deletes in chunks this size, for progress + resilience
+DELETE_THROTTLE_SECONDS = 0.05  # pause between individual deletes, to avoid hammering the DB/filesystem
 
 app = Flask(__name__)
 client = BirdnetClient(BASE_URL)
@@ -231,17 +235,34 @@ def api_search_summary():
     })
 
 
+@app.route("/api/config")
+def api_config():
+    return jsonify({
+        "maxSelection": MAX_SELECTION,
+        "deleteBatchSize": DELETE_BATCH_SIZE,
+        "deleteThrottleSeconds": DELETE_THROTTLE_SECONDS,
+    })
+
+
+# The frontend sends deletes in batches of DELETE_BATCH_SIZE (for progress
+# feedback and so an interrupted operation only loses the in-flight batch,
+# not the whole thing) -- this route still handles one batch per call.
+# DELETE_THROTTLE_SECONDS between each individual delete keeps a batch from
+# hammering BirdNET-Go's DB/filesystem in a tight burst, since each delete
+# does a DB write plus a directory scan to remove spectrogram files.
 @app.route("/api/delete", methods=["POST"])
 def api_delete():
     body = request.get_json(force=True) or {}
-    ids = body.get("ids", [])
+    ids = body.get("ids", [])[:MAX_SELECTION]  # defensive cap regardless of caller
     deleted = 0
     failed_ids = []
-    for detection_id in ids:
+    for i, detection_id in enumerate(ids):
         if client.delete_detection(str(detection_id)):
             deleted += 1
         else:
             failed_ids.append(detection_id)
+        if i < len(ids) - 1:
+            time.sleep(DELETE_THROTTLE_SECONDS)
     return jsonify({"deleted": deleted, "failed": len(failed_ids), "failed_ids": failed_ids})
 
 
