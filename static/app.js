@@ -563,6 +563,142 @@ el("next-page-btn").addEventListener("click", () => {
   }
 });
 
+document.querySelectorAll(".tab-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
+    document.querySelectorAll(".tab-panel").forEach((p) => {
+      p.hidden = p.id !== `tab-${btn.dataset.tab}`;
+    });
+  });
+});
+
+// Ordered list of currently-checked export field keys -- independent of
+// DOM/checkbox order, so the user can reorder output columns with the
+// ▲/▼ buttons without touching which fields are selected.
+state.exportFieldOrder = [];
+
+function exportFieldLabel(field) {
+  const cb = document.querySelector(`.export-field[value="${field}"]`);
+  return cb ? cb.closest("label").textContent.trim() : field;
+}
+
+function renderExportOrder() {
+  const list = el("export-order-list");
+  list.innerHTML = "";
+  state.exportFieldOrder.forEach((field, i) => {
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <span>${exportFieldLabel(field)}</span>
+      <span class="export-order-btns">
+        <button type="button" class="order-up" ${i === 0 ? "disabled" : ""}>▲</button>
+        <button type="button" class="order-down" ${i === state.exportFieldOrder.length - 1 ? "disabled" : ""}>▼</button>
+      </span>
+    `;
+    li.querySelector(".order-up").addEventListener("click", () => moveExportField(i, -1));
+    li.querySelector(".order-down").addEventListener("click", () => moveExportField(i, 1));
+    list.appendChild(li);
+  });
+}
+
+function moveExportField(index, delta) {
+  const target = index + delta;
+  if (target < 0 || target >= state.exportFieldOrder.length) return;
+  const arr = state.exportFieldOrder;
+  [arr[index], arr[target]] = [arr[target], arr[index]];
+  renderExportOrder();
+}
+
+function initExportFieldOrder() {
+  state.exportFieldOrder = Array.from(document.querySelectorAll(".export-field:checked")).map((cb) => cb.value);
+  document.querySelectorAll(".export-field").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      if (cb.checked) {
+        if (!state.exportFieldOrder.includes(cb.value)) state.exportFieldOrder.push(cb.value);
+      } else {
+        state.exportFieldOrder = state.exportFieldOrder.filter((f) => f !== cb.value);
+      }
+      renderExportOrder();
+    });
+  });
+  renderExportOrder();
+}
+
+document.querySelectorAll('input[name="export-format"]').forEach((radio) => {
+  radio.addEventListener("change", () => {
+    const isEbird = el("x-format-ebird").checked;
+    el("export-detections-panel").hidden = isEbird;
+    el("export-ebird-panel").hidden = !isEbird;
+  });
+});
+
+// Uses fetch()+blob (rather than a plain form GET/navigation) so a bad
+// request or an empty field selection surfaces through the normal toast
+// instead of the browser just showing a blank/JSON error page.
+async function doExport() {
+  const format = document.querySelector('input[name="export-format"]:checked').value;
+  const params = new URLSearchParams();
+  params.set("format", format);
+  params.set("dateStart", el("x-date-start").value || "");
+  params.set("dateEnd", el("x-date-end").value || "");
+
+  if (format === "ebird") {
+    const minConf = Math.max(0, Math.min(100, Number(el("x-ebird-min-conf").value || 0))) / 100;
+    params.set("minConfidence", String(minConf));
+    params.set("locationName", el("x-ebird-location").value || "");
+    params.set("stateProvince", el("x-ebird-state").value || "");
+    params.set("country", el("x-ebird-country").value || "");
+    params.set("protocol", el("x-ebird-protocol").value || "");
+    params.set("numObservers", el("x-ebird-observers").value || "");
+    params.set("distanceCovered", el("x-ebird-distance").value || "");
+    params.set("notes", el("x-ebird-notes").value || "");
+  } else {
+    const fields = state.exportFieldOrder;
+    if (fields.length === 0) {
+      showToast("Select at least one field to export.");
+      return;
+    }
+    params.set("dateFormat", el("x-date-format").value);
+    for (const f of fields) params.append("fields", f);
+  }
+
+  const btn = el("export-btn");
+  btn.disabled = true;
+  try {
+    const resp = await fetch(`/api/export.csv?${params}`);
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}));
+      throw new Error(data.error || `Export failed (${resp.status})`);
+    }
+    if (resp.headers.get("X-Export-Truncated") === "true") {
+      showToast(
+        "Export hit the page-sweep limit and may be incomplete — narrow the date range for a complete export.",
+        7000
+      );
+    }
+    const blob = await resp.blob();
+    const match = (resp.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : "birdnet-detections.csv";
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast(`Exported ${filename}`);
+  } catch (err) {
+    showToast(err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+el("export-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  doExport();
+});
+
 async function loadConfig() {
   try {
     const resp = await fetch("/api/config");
@@ -593,3 +729,4 @@ async function loadSources() {
 
 loadConfig();
 loadSources();
+initExportFieldOrder();

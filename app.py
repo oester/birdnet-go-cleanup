@@ -1,8 +1,10 @@
+import io
 import os
 import time
+from datetime import datetime
 
 import requests
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 from birdnet_client import BirdnetClient
 
@@ -29,6 +31,166 @@ DEFAULT_SEARCH = {
     "page": 1,
     "sortBy": "date_desc",
 }
+
+
+# Columns offered on the Export CSV tab, in export column order. Keys must
+# match field names in BirdNET-Go's /search response (confirmed live against
+# the dev server 2026-09-22) -- kept hand-in-sync with the checkboxes in
+# templates/index.html rather than generated, same as DEFAULT_SEARCH/the
+# filter form.
+EXPORT_FIELDS = {
+    "timestamp": "Timestamp",
+    "commonName": "Common Name",
+    "scientificName": "Scientific Name",
+    "confidence": "Confidence",
+    "verified": "Verified",
+    "source": "Source",
+    "device": "Device",
+    "modelType": "Model Type",
+    "hasAudio": "Has Audio",
+    "audioFilePath": "Audio File Path",
+    "latitude": "Latitude",
+    "longitude": "Longitude",
+    "week": "Week",
+    "id": "ID",
+}
+
+
+# Export-only alternate to the ISO 8601 timestamp BirdNET-Go returns
+# (e.g. "2026-09-21T00:15:46-05:00") -- keeps the same local wall-clock
+# time, just reformatted, for people who want a sortable/filename-safe
+# stamp instead.
+DATE_FORMATS = {
+    "iso": None,
+    "compact": "%Y%m%d_%H%M%S",
+}
+
+# These columns get double-quoted in the CSV even when they don't strictly
+# need it (no comma/quote in the value) -- requested explicitly so species
+# names are unambiguous to skim/grep in the raw file, e.g. "Blue Jay".
+FORCE_QUOTE_FIELDS = {"commonName", "scientificName"}
+
+
+def format_export_value(field: str, value, date_format: str = "iso") -> str:
+    if value is None:
+        return ""
+    if field == "timestamp":
+        strftime_fmt = DATE_FORMATS.get(date_format)
+        if strftime_fmt:
+            try:
+                return datetime.fromisoformat(value).strftime(strftime_fmt)
+            except (TypeError, ValueError):
+                return value
+        return value
+    if field == "hasAudio":
+        return "Yes" if value else "No"
+    return value
+
+
+def csv_cell(value, force_quote: bool = False) -> str:
+    text = "" if value is None else str(value)
+    if force_quote or any(c in text for c in ',"\n\r'):
+        text = '"' + text.replace('"', '""') + '"'
+    return text
+
+
+def csv_header_row(fields: list[str]) -> str:
+    return ",".join(csv_cell(EXPORT_FIELDS[f]) for f in fields) + "\r\n"
+
+
+def csv_data_row(values: list, fields: list[str]) -> str:
+    return ",".join(csv_cell(v, f in FORCE_QUOTE_FIELDS) for v, f in zip(values, fields)) + "\r\n"
+
+
+# Matches BirdNET-Pi's own "Export as CSV for eBird" feature (scripts/
+# history.php in mcguirepr89/BirdNET-Pi and its Nachtzuster/BirdNET-Pi
+# fork, confirmed against source 2026-09-22): eBird's 19-column Record
+# Format, one row per species per calendar hour, NO header row -- that
+# app writes rows straight from a per-hour/per-species SQL GROUP BY with
+# no header line, so eBird's bulk-checklist CSV importer expects none.
+# BirdNET-Pi hardcodes its confidence cutoff at 0.75 and (oddly) always
+# writes "1" for Number even though it computes the real per-hour count --
+# we use the real count instead, since that's what eBird's Number column
+# is actually for and BirdNET-Go gives us Lat/Lon per detection (BirdNET-Pi
+# has to pull it from static config instead).
+EBIRD_DEFAULT_MIN_CONFIDENCE = 0.75
+
+
+def export_ebird_csv():
+    try:
+        min_confidence = float(request.args.get("minConfidence", EBIRD_DEFAULT_MIN_CONFIDENCE))
+    except ValueError:
+        min_confidence = EBIRD_DEFAULT_MIN_CONFIDENCE
+    min_confidence = max(0.0, min(1.0, min_confidence))
+
+    location_name = request.args.get("locationName", "")
+    state_province = request.args.get("stateProvince", "")
+    country = request.args.get("country", "")
+    protocol = request.args.get("protocol", "")
+    num_observers = request.args.get("numObservers", "")
+    distance_covered = request.args.get("distanceCovered", "")
+    notes = request.args.get("notes", "")
+
+    payload = build_payload({
+        "dateStart": request.args.get("dateStart", ""),
+        "dateEnd": request.args.get("dateEnd", ""),
+        "sortBy": "date_asc",
+    })
+    payload["confidenceMin"] = min_confidence
+    try:
+        all_results, truncated = sweep_search(payload)
+    except requests.RequestException as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    # Bucket by (day, hour, species) -- same grouping BirdNET-Pi's History
+    # page does per day, generalized across whatever date range was picked.
+    groups: dict[tuple, dict] = {}
+    for r in all_results:
+        ts = r.get("timestamp")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts)
+        except ValueError:
+            continue
+        key = (dt.date(), dt.hour, r.get("commonName", ""), r.get("scientificName", ""))
+        g = groups.get(key)
+        if g is None:
+            g = {"count": 0, "latitude": r.get("latitude"), "longitude": r.get("longitude")}
+            groups[key] = g
+        g["count"] += 1
+
+    # Chronological, then (within an hour) busiest species first -- mirrors
+    # history.php's own "GROUP BY Sci_Name ORDER BY COUNT(*) DESC".
+    ordered_keys = sorted(groups, key=lambda k: (k[0], k[1], -groups[k]["count"]))
+
+    buf = io.StringIO()
+    for date, hour, common_name, sci_name in ordered_keys:
+        g = groups[(date, hour, common_name, sci_name)]
+        genus, _, species = (sci_name or "").partition(" ")
+        row = [
+            common_name, genus, species, g["count"], "",
+            location_name,
+            g["latitude"] if g["latitude"] is not None else "",
+            g["longitude"] if g["longitude"] is not None else "",
+            date.strftime("%m/%d/%Y"), f"{hour:02d}:00",
+            state_province, country, protocol, num_observers,
+            "60",  # Duration (minutes) -- fixed, matches the hour bucket
+            "Y",  # All observations reported?
+            distance_covered,
+            "",  # Area covered -- BirdNET-Pi never fills this either
+            notes,
+        ]
+        buf.write(",".join(csv_cell(v) for v in row) + "\r\n")
+
+    date_part = f"{payload['dateStart'] or 'all'}_to_{payload['dateEnd'] or 'all'}"
+    headers = {
+        "Content-Disposition": f'attachment; filename="ebird-checklist_{date_part}.csv"',
+        "Content-Type": "text/csv; charset=utf-8",
+    }
+    if truncated:
+        headers["X-Export-Truncated"] = "true"
+    return Response(buf.getvalue(), headers=headers)
 
 
 def build_payload(form: dict) -> dict:
@@ -233,6 +395,51 @@ def api_search_summary():
         "totalDetections": len(all_results),
         "truncated": truncated,
     })
+
+
+# Streams a CSV of every detection in the given date range (sweeping all
+# pages, same pattern/cap as the other bulk routes) with only the requested
+# columns. GET + a real filename/Content-Disposition (rather than a JSON
+# body) so it downloads like a normal file if hit directly, and the frontend
+# still uses fetch()+blob to surface errors/truncation via the usual toast.
+@app.route("/api/export.csv")
+def api_export_csv():
+    if request.args.get("format") == "ebird":
+        return export_ebird_csv()
+
+    # Column order follows the order `fields` arrives in the query string --
+    # the frontend sends them in the user's chosen order, not fixed order.
+    fields = [f for f in request.args.getlist("fields") if f in EXPORT_FIELDS]
+    if not fields:
+        return jsonify({"error": "Select at least one field to export"}), 400
+    date_format = request.args.get("dateFormat", "iso")
+    if date_format not in DATE_FORMATS:
+        date_format = "iso"
+
+    payload = build_payload({
+        "dateStart": request.args.get("dateStart", ""),
+        "dateEnd": request.args.get("dateEnd", ""),
+        "sortBy": "date_asc",
+    })
+    try:
+        all_results, truncated = sweep_search(payload)
+    except requests.RequestException as exc:
+        return jsonify({"error": str(exc)}), 502
+
+    buf = io.StringIO()
+    buf.write(csv_header_row(fields))
+    for r in all_results:
+        values = [format_export_value(f, r.get(f), date_format) for f in fields]
+        buf.write(csv_data_row(values, fields))
+
+    date_part = f"{payload['dateStart'] or 'all'}_to_{payload['dateEnd'] or 'all'}"
+    headers = {
+        "Content-Disposition": f'attachment; filename="birdnet-detections_{date_part}.csv"',
+        "Content-Type": "text/csv; charset=utf-8",
+    }
+    if truncated:
+        headers["X-Export-Truncated"] = "true"
+    return Response(buf.getvalue(), headers=headers)
 
 
 @app.route("/api/config")
