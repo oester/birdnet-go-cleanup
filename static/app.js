@@ -22,6 +22,8 @@ const state = {
   speciesById: new Map(), // id -> commonName, for any detection we've ever fetched full data for
   summaries: [],
   summarySort: { key: "count", asc: true },
+  summarySelected: new Set(), // scientificName keys of checked summary rows
+  summaryTruncated: false, // server withholds ids when true; delete/exclude stay disabled
 };
 
 function viewMode() {
@@ -137,10 +139,13 @@ async function runSummarySearch() {
     if (!resp.ok) throw new Error(`Search failed (${resp.status})`);
     const data = await resp.json();
     state.summaries = data.summaries || [];
+    state.summaryTruncated = !!data.truncated;
+    state.summarySelected.clear();
     if (data.truncated) {
       showToast(
-        "Swept the maximum number of pages without finishing — narrow the date range or other filters for complete results.",
-        7000
+        "Swept the maximum number of pages without finishing — counts are incomplete, so delete/exclude " +
+          "are disabled. Narrow the date range or other filters.",
+        9000
       );
     }
     renderSummary(data);
@@ -174,7 +179,11 @@ function renderSummary(data) {
   body.innerHTML = "";
   for (const s of sortedSummaries()) {
     const tr = document.createElement("tr");
+    const checked = state.summarySelected.has(s.scientificName);
+    if (checked) tr.classList.add("selected");
     tr.innerHTML = `
+      <td><input type="checkbox" class="summary-check" ${checked ? "checked" : ""}
+        ${state.summaryTruncated ? "disabled" : ""}></td>
       <td>${s.commonName ?? ""} <em>(${s.scientificName ?? ""})</em></td>
       <td>${s.count}</td>
       <td>${fmtTime(s.firstSeen)}</td>
@@ -185,8 +194,15 @@ function renderSummary(data) {
     tr.querySelector(".view-detections-btn").addEventListener("click", () => {
       viewSpeciesDetections(s.commonName);
     });
+    tr.querySelector(".summary-check").addEventListener("change", (e) => {
+      if (e.target.checked) state.summarySelected.add(s.scientificName);
+      else state.summarySelected.delete(s.scientificName);
+      tr.classList.toggle("selected", e.target.checked);
+      updateSummarySelectionUI();
+    });
     body.appendChild(tr);
   }
+  updateSummarySelectionUI();
 
   document.querySelectorAll("#summary-table th[data-sort]").forEach((th) => {
     th.textContent = th.textContent.replace(/ [▲▼]$/, "");
@@ -195,6 +211,135 @@ function renderSummary(data) {
     }
   });
 }
+
+function selectedSummaries() {
+  return state.summaries.filter((s) => state.summarySelected.has(s.scientificName));
+}
+
+function updateSummarySelectionUI() {
+  const rows = selectedSummaries();
+  const detections = rows.reduce((sum, s) => sum + (s.ids?.length || 0), 0);
+  const overCap = detections > config.maxSelection;
+  let text = "";
+  if (state.summaryTruncated) {
+    text = "Incomplete results — delete/exclude disabled";
+  } else if (rows.length > 0) {
+    text = `${rows.length} species selected (${detections} detection${detections === 1 ? "" : "s"})`;
+    if (overCap) text += ` — over the ${config.maxSelection} maximum`;
+  }
+  el("summary-selection-count").textContent = text;
+  const blocked = rows.length === 0 || state.summaryTruncated;
+  el("summary-delete-btn").disabled = blocked || overCap || detections === 0;
+  el("summary-exclude-delete-btn").disabled = blocked || overCap || detections === 0;
+  el("summary-exclude-btn").disabled = blocked;
+
+  const all = el("summary-select-all");
+  all.disabled = state.summaryTruncated || state.summaries.length === 0;
+  all.checked = state.summaries.length > 0 && rows.length === state.summaries.length;
+  all.indeterminate = rows.length > 0 && rows.length < state.summaries.length;
+}
+
+// "Blue Jay (3), Wood Duck (1), …" -- capped so a big selection doesn't
+// produce an unreadable confirm dialog.
+function summarySpeciesList(rows, withCounts) {
+  const MAX_NAMED = 15;
+  const names = rows.slice(0, MAX_NAMED).map((s) => (withCounts ? `${s.commonName} (${s.ids.length})` : s.commonName));
+  if (rows.length > MAX_NAMED) names.push(`and ${rows.length - MAX_NAMED} more`);
+  return names.join(", ");
+}
+
+function openSummaryDeleteConfirm({ alsoExclude = false } = {}) {
+  const rows = selectedSummaries();
+  const n = rows.reduce((sum, s) => sum + s.ids.length, 0);
+  if (n === 0) return;
+  const s = n === 1 ? "" : "s";
+  const list = summarySpeciesList(rows, true);
+  let text = alsoExclude
+    ? `Add ${rows.length} species to the server's excluded-species list (stops new detections of them ` +
+      `going forward, at any time of day), then delete their ${n} detection${s} matching the current ` +
+      `filters: ${list}? Deleting also removes audio clips/spectrograms and cannot be undone.`
+    : `Delete ${n} detection${s} of ${rows.length} species — every detection of them matching the current ` +
+      `filters: ${list}? This also removes their audio clips/spectrograms and cannot be undone. ` +
+      `It does not add them to the exclude list.`;
+  if (n >= LARGE_DELETE_THRESHOLD) {
+    text = `⚠️ ${text} A batch this size will take at least ~${Math.round(n * config.deleteThrottleSeconds)}s.`;
+  }
+  openConfirmDialog(text, () => doSummaryDelete({ alsoExclude }), {
+    okLabel: alsoExclude ? "Exclude & Delete" : "Delete",
+  });
+}
+
+function setSummaryControlsDisabled(disabled) {
+  for (const id of ["search-btn", "reset-btn", "summary-delete-btn", "summary-exclude-btn",
+                     "summary-exclude-delete-btn", "summary-select-all"]) {
+    el(id).disabled = disabled;
+  }
+  document.querySelectorAll(".summary-check").forEach((cb) => (cb.disabled = disabled));
+  if (!disabled) updateSummarySelectionUI();
+}
+
+// Deletes exactly the ids the summary counted (same sweep, same filters),
+// then re-runs the summary so counts reflect what actually got deleted --
+// e.g. locked detections the server refused stay listed.
+// With alsoExclude, the species are excluded FIRST so no new detections of
+// them get recorded while the delete is running.
+async function doSummaryDelete({ alsoExclude = false } = {}) {
+  const rows = selectedSummaries();
+  const ids = rows.flatMap((s) => s.ids);
+  const box = el("summary-delete-progress");
+  setSummaryControlsDisabled(true);
+  let excludeMessage = "";
+  try {
+    if (alsoExclude) {
+      const names = [...new Set(rows.map((s) => s.commonName).filter(Boolean))];
+      excludeMessage = `${await excludeSpecies(names, { toast: false })} · `;
+    }
+    const { deleted, failed } = await deleteInBatches(ids, "summary-delete-progress");
+    showToast(`${excludeMessage}Deleted ${deleted}, failed ${failed}`, 8000);
+    box.querySelector(".progress-text").textContent =
+      `Deleted ${deleted}${failed ? `, ${failed} failed` : ""} — refreshing summary…`;
+  } catch (err) {
+    showToast(`${excludeMessage}${err.message} — ${err.deleted ?? 0} deleted so far, stopped early.`, 8000);
+  }
+  try {
+    await runSummarySearch();
+  } finally {
+    hideDeleteProgress("summary-delete-progress");
+    setSummaryControlsDisabled(false);
+  }
+}
+
+function openSummaryExcludeConfirm() {
+  const rows = selectedSummaries();
+  const names = [...new Set(rows.map((s) => s.commonName).filter(Boolean))];
+  if (names.length === 0) return;
+  const label = names.length === 1 ? `"${names[0]}"` : `${names.length} species (${summarySpeciesList(
+    names.map((commonName) => ({ commonName })), false)})`;
+  openConfirmDialog(
+    `Add ${label} to the server's excluded-species list? This stops new detections of ` +
+      `${names.length === 1 ? "it" : "them"} from being recorded going forward, at any time of day — ` +
+      `it does not delete anything.`,
+    async () => {
+      el("summary-exclude-btn").disabled = true;
+      await excludeSpecies(names);
+      updateSummarySelectionUI();
+    },
+    { okLabel: "Add to Exclude List", danger: false }
+  );
+}
+
+el("summary-select-all").addEventListener("change", (e) => {
+  state.summarySelected = e.target.checked
+    ? new Set(state.summaries.map((s) => s.scientificName))
+    : new Set();
+  renderSummary({
+    speciesCount: state.summaries.length,
+    totalDetections: state.summaries.reduce((sum, s) => sum + s.count, 0),
+  });
+});
+el("summary-delete-btn").addEventListener("click", () => openSummaryDeleteConfirm());
+el("summary-exclude-delete-btn").addEventListener("click", () => openSummaryDeleteConfirm({ alsoExclude: true }));
+el("summary-exclude-btn").addEventListener("click", openSummaryExcludeConfirm);
 
 function viewSpeciesDetections(commonName) {
   el("f-species").value = commonName;
@@ -350,8 +495,10 @@ function clearSelection() {
 
 let pendingConfirmAction = null;
 
-function openConfirmDialog(text, action) {
+function openConfirmDialog(text, action, { okLabel = "Delete", danger = true } = {}) {
   el("confirm-text").textContent = text;
+  el("confirm-ok").textContent = okLabel;
+  el("confirm-ok").classList.toggle("danger", danger);
   pendingConfirmAction = action;
   el("confirm-modal").hidden = false;
 }
@@ -407,14 +554,16 @@ function openExcludeConfirm() {
   openConfirmDialog(
     `Add ${label} to the server's excluded-species list?${gap} This stops new detections of ` +
       `${names.length === 1 ? "it" : "them"} from being recorded going forward — it does not delete anything.`,
-    doExcludeSelected
+    doExcludeSelected,
+    { okLabel: "Add to Exclude List", danger: false }
   );
 }
 
-async function doExcludeSelected() {
-  const names = distinctSelectedSpecies();
-  if (names.length === 0) return;
-  el("exclude-btn").disabled = true;
+// Shared by Individual view's and the species summary's exclude action.
+// Shows the outcome as a toast (unless toast: false) and returns it; the
+// server dedupes and skips names already excluded (its endpoint is a toggle).
+async function excludeSpecies(names, { toast = true } = {}) {
+  let message;
   try {
     const resp = await fetch("/api/exclude_species", {
       method: "POST",
@@ -427,12 +576,20 @@ async function doExcludeSelected() {
     if (data.added?.length) parts.push(`excluded: ${data.added.join(", ")}`);
     if (data.alreadyExcluded?.length) parts.push(`already excluded: ${data.alreadyExcluded.join(", ")}`);
     if (data.failed?.length) parts.push(`failed: ${data.failed.join(", ")}`);
-    showToast(parts.join(" · ") || "No changes", 6000);
+    message = parts.join(" · ") || "No changes";
   } catch (err) {
-    showToast(err.message);
-  } finally {
-    updateSelectionUI();
+    message = err.message;
   }
+  if (toast) showToast(message, 6000);
+  return message;
+}
+
+async function doExcludeSelected() {
+  const names = distinctSelectedSpecies();
+  if (names.length === 0) return;
+  el("exclude-btn").disabled = true;
+  await excludeSpecies(names);
+  updateSelectionUI();
 }
 
 function setDeleteControlsDisabled(disabled) {
@@ -444,17 +601,17 @@ function setDeleteControlsDisabled(disabled) {
   if (!disabled) updateSelectionUI(); // restores delete/exclude's normal enabled-when-selected state
 }
 
-function showDeleteProgress(done, total, failed) {
-  const box = el("delete-progress");
+function showDeleteProgress(done, total, failed, boxId = "delete-progress") {
+  const box = el(boxId);
   box.hidden = false;
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  el("delete-progress-fill").style.width = `${pct}%`;
-  el("delete-progress-text").textContent =
+  box.querySelector(".progress-fill").style.width = `${pct}%`;
+  box.querySelector(".progress-text").textContent =
     `Deleting ${done} of ${total}${failed > 0 ? ` (${failed} failed)` : ""}…`;
 }
 
-function hideDeleteProgress() {
-  el("delete-progress").hidden = true;
+function hideDeleteProgress(boxId = "delete-progress") {
+  el(boxId).hidden = true;
 }
 
 // Sends the selected ids to the server in config.deleteBatchSize chunks
@@ -463,28 +620,40 @@ function hideDeleteProgress() {
 // the UI can show real progress instead of freezing until everything is
 // done, and an interruption (closed tab, network drop) only loses the
 // in-flight batch rather than silently losing track of the whole operation.
-async function doDelete() {
-  const ids = Array.from(state.selectedIds);
-  setDeleteControlsDisabled(true);
+// Shared by Individual view's and the species summary's Delete Selected.
+// Throws on an HTTP failure with `deleted` (count so far) attached.
+async function deleteInBatches(ids, progressBoxId) {
   let deleted = 0;
   let failed = 0;
   const failedIds = [];
-  showDeleteProgress(0, ids.length, 0);
-  try {
-    for (let i = 0; i < ids.length; i += config.deleteBatchSize) {
-      const batch = ids.slice(i, i + config.deleteBatchSize);
-      const resp = await fetch("/api/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids: batch }),
-      });
-      if (!resp.ok) throw new Error(`Delete failed (${resp.status}) after ${deleted} of ${ids.length}`);
-      const data = await resp.json();
-      deleted += data.deleted || 0;
-      failed += data.failed || 0;
-      failedIds.push(...(data.failed_ids || []));
-      showDeleteProgress(deleted + failed, ids.length, failed);
+  showDeleteProgress(0, ids.length, 0, progressBoxId);
+  for (let i = 0; i < ids.length; i += config.deleteBatchSize) {
+    const batch = ids.slice(i, i + config.deleteBatchSize);
+    const resp = await fetch("/api/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: batch }),
+    });
+    if (!resp.ok) {
+      throw Object.assign(
+        new Error(`Delete failed (${resp.status}) after ${deleted} of ${ids.length}`),
+        { deleted }
+      );
     }
+    const data = await resp.json();
+    deleted += data.deleted || 0;
+    failed += data.failed || 0;
+    failedIds.push(...(data.failed_ids || []));
+    showDeleteProgress(deleted + failed, ids.length, failed, progressBoxId);
+  }
+  return { deleted, failed, failedIds };
+}
+
+async function doDelete() {
+  const ids = Array.from(state.selectedIds);
+  setDeleteControlsDisabled(true);
+  try {
+    const { deleted, failed, failedIds } = await deleteInBatches(ids, "delete-progress");
     state.selectedIds.clear();
     showToast(`Deleted ${deleted}, failed ${failed}`, 6000);
     if (state.mode === "grouped") {
@@ -501,9 +670,9 @@ async function doDelete() {
       await runSearch(state.currentPage);
     }
   } catch (err) {
-    showToast(`${err.message} — ${deleted} deleted so far, stopped early.`, 8000);
+    showToast(`${err.message} — ${err.deleted ?? 0} deleted so far, stopped early.`, 8000);
   } finally {
-    hideDeleteProgress();
+    hideDeleteProgress("delete-progress");
     setDeleteControlsDisabled(false);
   }
 }
@@ -524,6 +693,8 @@ el("reset-btn").addEventListener("click", () => {
   state.results = [];
   state.allResults = [];
   state.summaries = [];
+  state.summarySelected.clear();
+  state.summaryTruncated = false;
   state.total = 0;
   state.pages = 1;
   state.currentPage = 1;

@@ -10,6 +10,11 @@ from birdnet_client import BirdnetClient
 
 BASE_URL = os.environ.get("BIRDNET_BASE_URL", "http://localhost:8080/api/v2")
 MAX_SWEEP_PAGES = 500  # safety cap for /api/search_all_ids
+# Sweeps whose per-species COUNTS drive what gets selected/deleted (count
+# filter, species summary) must see the whole range: a count taken over a
+# truncated sweep makes common species look rare. /search is fixed at 20
+# rows/page (~5ms each), so a busy month is ~2,300 pages / ~12s.
+COUNT_MAX_SWEEP_PAGES = 5000  # 100k rows
 # CSV export reads GET /detections at 1000 rows/request instead of /search's
 # fixed 20 rows/page (one busy month is ~46 requests vs ~2,300 pages).
 EXPORT_PAGE_SIZE = 1000
@@ -169,12 +174,12 @@ def build_payload(form: dict) -> dict:
     return payload
 
 
-def sweep_search(payload: dict) -> tuple[list[dict], bool]:
+def sweep_search(payload: dict, max_pages: int = MAX_SWEEP_PAGES) -> tuple[list[dict], bool]:
     """Fetches every page of a filtered search. Returns (all results, truncated)."""
     payload = dict(payload)
     payload["page"] = 1
     all_results: list[dict] = []
-    for _ in range(MAX_SWEEP_PAGES):
+    for _ in range(max_pages):
         data = client.search(payload)
         results = data.get("results", [])
         all_results.extend(results)
@@ -268,7 +273,7 @@ def api_search_by_count():
 
     payload = build_payload(body)
     try:
-        all_results, truncated = sweep_search(payload)
+        all_results, truncated = sweep_search(payload, COUNT_MAX_SWEEP_PAGES)
     except requests.RequestException as exc:
         return jsonify({"error": str(exc)}), 502
 
@@ -309,7 +314,7 @@ def api_search_summary():
     body = request.get_json(force=True) or {}
     payload = build_payload(body)
     try:
-        all_results, truncated = sweep_search(payload)
+        all_results, truncated = sweep_search(payload, COUNT_MAX_SWEEP_PAGES)
     except requests.RequestException as exc:
         return jsonify({"error": str(exc)}), 502
 
@@ -325,9 +330,11 @@ def api_search_summary():
                 "_confidenceSum": 0.0,
                 "firstSeen": None,
                 "lastSeen": None,
+                "ids": [],
             }
             groups[key] = g
         g["count"] += 1
+        g["ids"].append(r.get("id"))
         g["_confidenceSum"] += r.get("confidence") or 0
         ts = r.get("timestamp") or ""
         if ts and (g["firstSeen"] is None or ts < g["firstSeen"]):
@@ -339,6 +346,10 @@ def api_search_summary():
     for g in groups.values():
         g["avgConfidence"] = g["_confidenceSum"] / g["count"] if g["count"] else 0
         del g["_confidenceSum"]
+        # A truncated sweep's ids (and counts) cover only part of the range --
+        # withhold them so the summary can't drive a delete from wrong counts.
+        if truncated:
+            g["ids"] = []
         summaries.append(g)
 
     count_op = body.get("countOp")

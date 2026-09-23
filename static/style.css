@@ -229,6 +229,11 @@ button.danger {
   color: var(--muted);
 }
 
+/* display:flex above beats the browser's own [hidden] rule, same as the modal. */
+.delete-progress[hidden] {
+  display: none;
+}
+
 .progress-bar {
   flex: 1;
   height: 8px;
