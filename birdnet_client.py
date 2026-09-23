@@ -51,6 +51,21 @@ class BirdnetClient:
         resp.raise_for_status()
         return resp.json()
 
+    # GET /detections pages up to 1000 rows per request (vs /search's fixed
+    # 20), but only honors a date range when BOTH start and end are given --
+    # a lone bound is silently ignored and returns everything.
+    def list_detections(self, start_date: str, end_date: str, limit: int, offset: int) -> dict:
+        params = {
+            "queryType": "search",
+            "start_date": start_date,
+            "end_date": end_date,
+            "numResults": limit,
+            "offset": offset,
+        }
+        resp = self.session.get(f"{self.base_url}/detections", params=params, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
     def delete_detection(self, detection_id: str) -> bool:
         resp = self._request("DELETE", f"/detections/{detection_id}")
         return resp.ok

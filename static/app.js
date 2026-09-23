@@ -623,43 +623,20 @@ function initExportFieldOrder() {
   renderExportOrder();
 }
 
-document.querySelectorAll('input[name="export-format"]').forEach((radio) => {
-  radio.addEventListener("change", () => {
-    const isEbird = el("x-format-ebird").checked;
-    el("export-detections-panel").hidden = isEbird;
-    el("export-ebird-panel").hidden = !isEbird;
-  });
-});
-
 // Uses fetch()+blob (rather than a plain form GET/navigation) so a bad
 // request or an empty field selection surfaces through the normal toast
 // instead of the browser just showing a blank/JSON error page.
 async function doExport() {
-  const format = document.querySelector('input[name="export-format"]:checked').value;
+  const fields = state.exportFieldOrder;
+  if (fields.length === 0) {
+    showToast("Select at least one field to export.");
+    return;
+  }
   const params = new URLSearchParams();
-  params.set("format", format);
   params.set("dateStart", el("x-date-start").value || "");
   params.set("dateEnd", el("x-date-end").value || "");
-
-  if (format === "ebird") {
-    const minConf = Math.max(0, Math.min(100, Number(el("x-ebird-min-conf").value || 0))) / 100;
-    params.set("minConfidence", String(minConf));
-    params.set("locationName", el("x-ebird-location").value || "");
-    params.set("stateProvince", el("x-ebird-state").value || "");
-    params.set("country", el("x-ebird-country").value || "");
-    params.set("protocol", el("x-ebird-protocol").value || "");
-    params.set("numObservers", el("x-ebird-observers").value || "");
-    params.set("distanceCovered", el("x-ebird-distance").value || "");
-    params.set("notes", el("x-ebird-notes").value || "");
-  } else {
-    const fields = state.exportFieldOrder;
-    if (fields.length === 0) {
-      showToast("Select at least one field to export.");
-      return;
-    }
-    params.set("dateFormat", el("x-date-format").value);
-    for (const f of fields) params.append("fields", f);
-  }
+  params.set("dateFormat", el("x-date-format").value);
+  for (const f of fields) params.append("fields", f);
 
   const btn = el("export-btn");
   btn.disabled = true;
@@ -671,7 +648,7 @@ async function doExport() {
     }
     if (resp.headers.get("X-Export-Truncated") === "true") {
       showToast(
-        "Export hit the page-sweep limit and may be incomplete — narrow the date range for a complete export.",
+        "Export hit the row limit and may be incomplete — narrow the date range for a complete export.",
         7000
       );
     }

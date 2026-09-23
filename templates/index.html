@@ -171,10 +171,6 @@
 
   <div id="tab-export" class="tab-panel" hidden>
     <form id="export-form">
-      <div class="view-toggle">
-        <label><input type="radio" name="export-format" id="x-format-detections" value="detections" checked> Detections (custom columns)</label>
-        <label><input type="radio" name="export-format" id="x-format-ebird" value="ebird"> eBird checklist (BirdNET-Pi format)</label>
-      </div>
       <div class="filter-grid">
         <label>Date start
           <input type="date" id="x-date-start">
@@ -184,81 +180,36 @@
         </label>
       </div>
 
-      <div id="export-detections-panel">
-        <div class="filter-grid">
-          <label>Timestamp format
-            <select id="x-date-format">
-              <option value="iso" selected>ISO 8601 (as stored)</option>
-              <option value="compact">YYYYMMDD_HHMMSS</option>
-            </select>
-          </label>
-        </div>
-        <fieldset class="export-fields">
-          <legend>Fields to include</legend>
-          <label><input type="checkbox" class="export-field" value="timestamp" checked> Timestamp</label>
-          <label><input type="checkbox" class="export-field" value="commonName" checked> Common name</label>
-          <label><input type="checkbox" class="export-field" value="scientificName" checked> Scientific name</label>
-          <label><input type="checkbox" class="export-field" value="confidence" checked> Confidence</label>
-          <label><input type="checkbox" class="export-field" value="verified" checked> Verified</label>
-          <label><input type="checkbox" class="export-field" value="source" checked> Source</label>
-          <label><input type="checkbox" class="export-field" value="device"> Device</label>
-          <label><input type="checkbox" class="export-field" value="modelType"> Model type</label>
-          <label><input type="checkbox" class="export-field" value="hasAudio"> Has audio</label>
-          <label><input type="checkbox" class="export-field" value="audioFilePath"> Audio file path</label>
-          <label><input type="checkbox" class="export-field" value="latitude"> Latitude</label>
-          <label><input type="checkbox" class="export-field" value="longitude"> Longitude</label>
-          <label><input type="checkbox" class="export-field" value="week"> Week</label>
-          <label><input type="checkbox" class="export-field" value="id"> ID</label>
-        </fieldset>
-        <div class="export-order">
-          <p class="export-order-label">Column order (use ▲/▼ to reorder; updates as fields are checked/unchecked)</p>
-          <ol id="export-order-list"></ol>
-        </div>
+      <div class="filter-grid">
+        <label>Timestamp format
+          <select id="x-date-format">
+            <option value="iso" selected>ISO 8601 (as stored)</option>
+            <option value="compact">YYYYMMDD_HHMMSS</option>
+          </select>
+        </label>
       </div>
-
-      <div id="export-ebird-panel" hidden>
-        <div class="filter-grid">
-          <label>Minimum confidence %
-            <input type="number" id="x-ebird-min-conf" min="0" max="100" value="75">
-          </label>
-          <label>Location name
-            <input type="text" id="x-ebird-location" placeholder="e.g. My Backyard">
-          </label>
-          <label>State/Province
-            <input type="text" id="x-ebird-state">
-          </label>
-          <label>Country
-            <input type="text" id="x-ebird-country">
-          </label>
-          <label>Protocol
-            <input type="text" id="x-ebird-protocol" placeholder="e.g. Stationary">
-          </label>
-          <label>Number of observers
-            <input type="number" id="x-ebird-observers" min="1">
-          </label>
-          <label>Distance covered
-            <input type="text" id="x-ebird-distance">
-          </label>
-          <label>Notes
-            <input type="text" id="x-ebird-notes">
-          </label>
-        </div>
-        <p class="filter-hint">
-          Matches BirdNET-Pi's "Export as CSV for eBird" format: one row per
-          species per calendar hour, with the hour's detection count as
-          "Number" and the minimum confidence above as the cutoff (BirdNET-Pi
-          hardcodes 75%) — 19 eBird Record-Format columns, no header row,
-          ready for eBird's bulk checklist CSV import. The location/observer
-          fields above aren't part of the detection data, so fill in whatever
-          applies (or leave blank) before exporting.
-        </p>
+      <fieldset class="export-fields">
+        <legend>Fields to include</legend>
+        <label><input type="checkbox" class="export-field" value="timestamp" checked> Timestamp</label>
+        <label><input type="checkbox" class="export-field" value="commonName" checked> Common name</label>
+        <label><input type="checkbox" class="export-field" value="scientificName" checked> Scientific name</label>
+        <label><input type="checkbox" class="export-field" value="confidence" checked> Confidence</label>
+        <label><input type="checkbox" class="export-field" value="verified" checked> Verified</label>
+        <label><input type="checkbox" class="export-field" value="source" checked> Source</label>
+        <label><input type="checkbox" class="export-field" value="modelType"> Model type</label>
+        <label><input type="checkbox" class="export-field" value="hasAudio"> Has audio</label>
+        <label><input type="checkbox" class="export-field" value="audioFilePath"> Audio file path</label>
+        <label><input type="checkbox" class="export-field" value="week"> Week</label>
+        <label><input type="checkbox" class="export-field" value="id"> ID</label>
+      </fieldset>
+      <div class="export-order">
+        <p class="export-order-label">Column order (use ▲/▼ to reorder; updates as fields are checked/unchecked)</p>
+        <ol id="export-order-list"></ol>
       </div>
 
       <p class="filter-hint">
-        Exports every detection in the date range above (leave either date
-        blank for open-ended), sweeping all pages the same way "Select all
-        matching" does — subject to the same page-sweep cap, so a very wide
-        range with no other narrowing may be reported as incomplete.
+        Exports every detection in the date range above, oldest first
+        (leave either date blank for open-ended).
       </p>
       <div class="filter-actions">
         <button type="submit" id="export-btn">Export CSV</button>
