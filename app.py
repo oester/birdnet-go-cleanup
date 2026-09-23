@@ -10,6 +10,10 @@ from birdnet_client import BirdnetClient
 
 BASE_URL = os.environ.get("BIRDNET_BASE_URL", "http://localhost:8080/api/v2")
 MAX_SWEEP_PAGES = 500  # safety cap for /api/search_all_ids
+# CSV exports sweep far more pages than select/delete: /search is fixed at
+# 20 rows/page, so one busy month is ~2,300 pages (~12s at ~5ms/page).
+# 15,000 pages = 300k rows -- several months -- before truncating.
+EXPORT_MAX_SWEEP_PAGES = 15000
 MAX_SELECTION = 500  # absolute cap on how many detections can be selected/deleted at once
 DELETE_BATCH_SIZE = 25  # frontend sends deletes in chunks this size, for progress + resilience
 DELETE_THROTTLE_SECONDS = 0.05  # pause between individual deletes, to avoid hammering the DB/filesystem
@@ -138,7 +142,7 @@ def export_ebird_csv():
     })
     payload["confidenceMin"] = min_confidence
     try:
-        all_results, truncated = sweep_search(payload)
+        all_results, truncated = sweep_search(payload, EXPORT_MAX_SWEEP_PAGES)
     except requests.RequestException as exc:
         return jsonify({"error": str(exc)}), 502
 
@@ -204,12 +208,12 @@ def build_payload(form: dict) -> dict:
     return payload
 
 
-def sweep_search(payload: dict) -> tuple[list[dict], bool]:
+def sweep_search(payload: dict, max_pages: int = MAX_SWEEP_PAGES) -> tuple[list[dict], bool]:
     """Fetches every page of a filtered search. Returns (all results, truncated)."""
     payload = dict(payload)
     payload["page"] = 1
     all_results: list[dict] = []
-    for _ in range(MAX_SWEEP_PAGES):
+    for _ in range(max_pages):
         data = client.search(payload)
         results = data.get("results", [])
         all_results.extend(results)
@@ -422,7 +426,7 @@ def api_export_csv():
         "sortBy": "date_asc",
     })
     try:
-        all_results, truncated = sweep_search(payload)
+        all_results, truncated = sweep_search(payload, EXPORT_MAX_SWEEP_PAGES)
     except requests.RequestException as exc:
         return jsonify({"error": str(exc)}), 502
 
